@@ -1,22 +1,25 @@
-# Nginx API Gateway + `auth_request` orqali umumiy `_auth_check` (Microservices uchun)
-
-**Muallif:** Abdujabborov Oybek + ChatGPT
+# Microservice Architecture with Nginx API Gateway & Centralized Authentication
 
 ---
 
 ## 1) Maqsad
 
-Ushbu README quyidagi Nginx konfiguratsiyaning **qanday ishlashini**, ayniqsa **`auth_request` + umumiy `/_auth_check`** mexanizmini batafsil tushuntiradi:
+Ushbu hujjat Nginx API Gateway orqali microservice’larni **markaziy autentifikatsiya** (centralized authentication) bilan himoyalash modelini tushuntiradi. Asosiy e’tibor:
 
-- `/api/auth/*` endpointlari **public**
-- `/api/products/*`, `/api/orders/*`, `/api/payments/*` endpointlari **protected**
-- Har bir protected request oldidan Nginx **ichki subrequest** (`/_auth_check`) yuboradi
-- `/_auth_check` auth-service’dagi `/api/auth/verify` ni chaqiradi
-- Auth-service `2xx` qaytarsa request davom etadi, `401/403` qaytarsa to‘xtatiladi
+- `auth_request` yordamida barcha protected `/api/*` trafikni auth-service orqali tekshirish
+- `_auth_check` — Nginx ichida umumiy “gate” sifatida ishlashi
+- JWT **Access** va **Refresh** tokenlarni **Authorization header** va **HttpOnly cookie** orqali ishlatish namunalarini ko‘rsatish
 
 ---
 
-## 2) Nginx konfiguratsiya (berilgan holat)
+## 2) Nginx konfiguratsiya (API Gateway)
+
+Quyidagi konfiguratsiyada:
+
+- `/api/auth/*` endpointlari **public**
+- `/api/products/*`, `/api/orders/*`, `/api/payments/*` endpointlari **protected**
+- Har protected request oldidan Nginx `/_auth_check` subrequest qiladi
+- `/_auth_check` auth-service’dagi `/api/auth/verify` ni chaqiradi
 
 ```nginx
 worker_processes auto;
@@ -105,189 +108,189 @@ http {
 
 ---
 
-## 3) Bu setup qanday ishlaydi? (qadam-baqadam)
+## 3) `auth_request` va `/_auth_check` qanday ishlaydi?
 
-### 3.1. “Public” va “Protected” farqi
-- **Public:** `location /api/auth/ { ... }`
-  - Login, refresh, register va hokazo endpointlar shu yerda bo‘ladi.
-  - Bu `location` ichida `auth_request` yo‘q, shuning uchun tekshiruvsiz o‘tadi.
+### 3.1. Protected endpointga request kelganda
+Misol:
 
-- **Protected:** `location /api/products/`, `/api/orders/`, `/api/payments/`
-  - Bu `location`lar ichida `auth_request /_auth_check;` bor.
-  - Demak har requestdan oldin auth tekshiruv bo‘ladi.
-
-### 3.2. `auth_request` nima qiladi?
-`auth_request` — Nginx’ning built-in mexanizmi: u asosiy requestni upstreamga yuborishdan oldin **subrequest** bajaradi.
-
-Misol: client quyidagini chaqirdi:
 ```
 GET /api/orders/123
-Authorization: Bearer <access_token>
+Authorization: Bearer <ACCESS_TOKEN>
 ```
 
-Nginx oqimi:
-1) `GET /api/orders/123` request `/api/orders/` locationiga tushadi.
-2) Shu location ichida `auth_request /_auth_check;` borligi uchun Nginx avval:
-   - ichki subrequest: `GET /_auth_check` ni bajaradi.
-3) `/_auth_check` location `internal;` bo‘lgani uchun:
-   - **tashqi client uni bevosita chaqira olmaydi**
-   - faqat Nginx o‘zi `auth_request` orqali chaqira oladi.
-4) `/_auth_check` esa auth-service’ga proxy qiladi:
-   - `proxy_pass http://auth_service/api/auth/verify;`
-   - va client yuborgan tokenlarni auth-service’ga uzatadi:
+Oqim:
+1) Request `/api/orders/` locationiga tushadi.
+2) `auth_request /_auth_check;` sabab Nginx avval **subrequest** qiladi:
+   - `GET /_auth_check`
+3) `/_auth_check` location `internal;` bo‘lgani uchun uni **tashqi client** chaqira olmaydi (faqat Nginx ichki chaqiradi).
+4) `/_auth_check` auth-service’ga proxy qiladi:
+   - `GET http://auth_service/api/auth/verify`
+   - va token manbalarini forward qiladi:
      - `Authorization` header
      - `Cookie` header
-5) Auth-service `/api/auth/verify` javobi:
-   - **2xx** → Nginx asosiy requestni order-service’ga yuboradi
-   - **401/403** → Nginx asosiy requestni **bloklaydi** va clientga shu statusni qaytaradi
+5) Auth-service javobi:
+   - **2xx** → Nginx asosiy requestni microservice’ga yuboradi
+   - **401/403** → Nginx requestni bloklaydi
 
-> Muhim: `auth_request` natijasi asosiy requestga “gate” bo‘ladi. Ya’ni auth o‘tmasa, mikroservis umuman chaqirilmaydi.
-
----
-
-## 4) Nega `_auth_check` “umumiy” hisoblanadi?
-
-Chunki `/_auth_check` bitta joyda turadi va quyidagi barcha protected locationlar **bir xil** tekshiruv endpointidan foydalanadi:
-
+### 3.2. Nega `_auth_check` “umumiy gate”?
+Chunki u bitta joyda turadi va barcha protected locationlar uni ishlatadi:
 - `/api/products/*`
 - `/api/orders/*`
 - `/api/payments/*`
 
-Ya’ni tekshiruv mantiqi:
-- Nginx’da takrorlanmaydi
-- Har bir mikroservisga ham tarqatilmaydi
-- Bitta markaziy auth-service’da boshqariladi
-
 ---
 
-## 5) `auth_request_set` va header mapping
+## 4) `auth_request_set` orqali identity headerlar
 
-Auth-service verify endpointi muvaffaqiyatli bo‘lsa, u quyidagi headerlarni qaytarishi mumkin:
+Auth-service `/api/auth/verify` muvaffaqiyatli bo‘lsa, u Nginx o‘qiy oladigan headerlar qaytaradi (misol):
 
 - `X-User-Id: 123`
 - `X-User-Role: admin`
-- `X-User-Mfa: true` (yoki `1`)
+- `X-User-Mfa: 1`
 
-Nginx shu headerlarni `auth_request_set` orqali o‘zgaruvchilarga oladi:
+Nginx ularni olib microservice’ga uzatadi:
 
 ```nginx
 auth_request_set $user_id $upstream_http_x_user_id;
-auth_request_set $role    $upstream_http_x_user_role;
-auth_request_set $mfa     $upstream_http_x_user_mfa;
+proxy_set_header X-User-Id $user_id;
 ```
 
-So‘ng ularni mikroservisga forward qiladi:
-
-```nginx
-proxy_set_header X-User-Id   $user_id;
-proxy_set_header X-User-Role $role;
-proxy_set_header X-User-Mfa  $mfa;
-```
-
-### Mikroservis tomonda nima bo‘ladi?
-Microservice endi JWT tekshirmaydi. U shunchaki:
-
-- `X-User-Id` mavjudligini tekshiradi (yoki majburiy deb qabul qiladi)
-- `X-User-Role` bo‘yicha biznes ruxsatlarni ishlatadi
-- `X-User-Mfa` bo‘yicha qo‘shimcha policy ishlatadi
-
-> Eslatma: Bu modelda ishonch chegarasi (trust boundary) — Nginx. Shu sababli mikroservislar faqat internal network’da bo‘lishi, to‘g‘ridan-to‘g‘ri internetdan ochiq bo‘lmasligi kerak.
+Natija: microservice JWT tekshirmaydi; u Nginx’dan kelgan `X-User-*` headerlar asosida ishlaydi (biznes ruxsatlar, role-based policy, va h.k.).
 
 ---
 
-## 6) Auth-service `/api/auth/verify` contract (shartnoma)
+## 5) JWT Access + Refresh bilan ishlash namunalar
 
-### 6.1. Nginx verify’dan nimani kutadi?
-- **Status code** muhim:
-  - `200` (yoki umumiy 2xx) → “OK, user authenticated”
-  - `401/403` → “Not allowed”
-- Optional: qo‘shimcha “identity” headerlar:
-  - `X-User-Id`
-  - `X-User-Role`
-  - `X-User-Mfa`
+Quyida amaliyotda eng ko‘p ishlatiladigan model keltirilgan:
 
-### 6.2. Minimal verify pseudocode
+- **Access Token**: 10–15 daqiqa (stateless), odatda `Authorization: Bearer ...` orqali yuboriladi
+- **Refresh Token**: 7–30 kun (server-side nazorat), odatda `HttpOnly cookie`da saqlanadi
+- Refresh token yordamida yangi access token olinadi (rotation tavsiya)
+
+### 5.1. Tokenlarni qayerda saqlash va qanday yuborish?
+
+**Tavsiya etiladigan model:**
+- Access token → frontend memory (yoki secure storage) → har requestda header orqali yuboriladi
+- Refresh token → `HttpOnly` cookie → brauzer avtomatik yuboradi (JS o‘qiy olmaydi)
+
+**Cookie nomlari (misol):**
+- `refresh_token` (HttpOnly)
+- (ixtiyoriy) `access_token` cookie’da ham bo‘lishi mumkin, lekin odatda access headerda bo‘ladi
+
+### 5.2. Login: access token JSON’da, refresh token cookie’da
+
+#### HTTP (misol)
+`POST /api/auth/login`
+```http
+POST /api/auth/login HTTP/1.1
+Content-Type: application/json
+
+{"email":"a@a.com","password":"123456"}
+```
+
+#### Javob (misol)
+- refresh token → `Set-Cookie: refresh_token=...; HttpOnly; Secure; SameSite=Lax`
+- access token → JSON body
+
+```json
+{ "access_token": "<JWT_ACCESS>" }
+```
+
+### 5.3. Protected API chaqirish (Authorization header)
+
+#### curl misol
+```bash
+curl -i http://localhost/api/orders/123   -H "Authorization: Bearer <JWT_ACCESS>"
+```
+
+Nginx:
+- `Authorization` headerni `/_auth_check` ga uzatadi
+- auth-service `/verify` 2xx qaytarsa request microservice’ga o‘tadi
+
+### 5.4. Refresh qilish (cookie orqali)
+
+Frontend access token eskirsa:
+- `POST /api/auth/refresh` chaqiradi
+- refresh token cookie’da bo‘lgani uchun brauzer **avtomatik yuboradi**
+- server yangi access token qaytaradi va (rotation bo‘lsa) yangi refresh cookie beradi
+
+#### curl misol (cookie bilan)
+```bash
+curl -i -X POST http://localhost/api/auth/refresh   --cookie "refresh_token=<JWT_REFRESH>"
+```
+
+#### Browser fetch misol (cookie yuborilishi uchun)
 ```js
-// 1) Access tokenni ol
-// 2) JWT verify (signature + exp)
-// 3) Qo‘shimcha policy (revoked/jti, token_version, mfa, etc)
-// 4) OK bo‘lsa 200 va X-User-* headerlar
-// 5) Aks holda 401/403
+// cookie yuborilishi uchun credentials shart (frontend va gateway domeniga bog‘liq)
+const res = await fetch("/api/auth/refresh", {
+  method: "POST",
+  credentials: "include"
+});
+const data = await res.json();
+const accessToken = data.access_token;
 ```
 
----
+### 5.5. Verify endpoint tokenni qayerdan oladi?
 
-## 7) Nega `proxy_pass_request_body off;` ishlatilgan?
+Auth-service `verify` odatda tokenni quyidagi tartibda qidiradi (tavsiya):
 
-`/_auth_check` faqat “kimligi”ni tekshiradi.
-Body yuborish shart emas va ortiqcha overhead:
+1) `Authorization: Bearer <access>` (birinchi prioritet)
+2) agar bo‘lmasa: `Cookie: access_token=<access>` (agar siz access’ni cookie’da saqlasangiz)
 
-- network traffic kamayadi
-- auth-service yuklanishi kamayadi
-- tekshiruv tezlashadi
+Nginx konfiguratsiyangiz har ikkisini auth-service’ga uzatadi:
+- `proxy_set_header Authorization $http_authorization;`
+- `proxy_set_header Cookie $http_cookie;`
 
-Shuning uchun:
+### 5.6. Logout (refreshni bekor qilish + ixtiyoriy access revoke)
 
-```nginx
-proxy_pass_request_body off;
-proxy_set_header Content-Length "";
-```
+Logout odatda refresh tokenni server-side invalid qiladi (rotation bo‘lsa juda muhim).
 
----
-
-## 8) “Har doim ishlaydimi?” — aniq javob
-
-Ha, quyidagi shart bilan:
-
-- Request protected locationga tushsa (`/api/products/`, `/api/orders/`, `/api/payments/`)
-- O‘sha location ichida `auth_request /_auth_check;` bo‘lsa
-
-Shunda **har bir requestda** Nginx verify subrequest qiladi.
-
-Lekin `/api/auth/*` public bo‘lgani uchun u yerda `/_auth_check` ishlamaydi.
-
----
-
-## 9) Amaliy shartlar (Production uchun)
-
-1) **Auth-service va microservice portlari internetga ochilmasin**
-   - faqat Nginx public bo‘lsin
-2) `/_auth_check` `internal;` bo‘lishi shart (sizda bor)
-3) HTTPS bo‘lsa cookie `secure: true`
-4) Agar CORS preflight (`OPTIONS`) ko‘p bo‘lsa, uni authsiz o‘tkazish kerak bo‘lishi mumkin (case-by-case)
-5) Auth-service `verify` endpointi tez ishlashi kerak (Redis kesh tavsiya)
-
----
-
-## 10) Tez test (curl)
-
-### 10.1. Token yo‘q (401)
+#### curl logout (cookie yuborib)
 ```bash
-curl -i http://localhost/api/orders/123
+curl -i -X POST http://localhost/api/auth/logout   --cookie "refresh_token=<JWT_REFRESH>"   -H "Authorization: Bearer <JWT_ACCESS>"
 ```
 
-### 10.2. Token bilan (200 yoki 401)
+### 5.7. “Darhol chiqarish” (force logout) — token muddatini kutmasdan
+
+Agar siz “userda access token 10 daqiqa qolgan bo‘lsa ham, keyingi requestdayoq 401 bo‘lsin” desangiz,
+auth-service `verify` ichida **server-side state** tekshiruv bo‘lishi kerak:
+
+- `token_version` (global logout) yoki
+- `jti` denylist (single token logout)
+
+Bu logika auth-service’da bo‘ladi; Nginx faqat `/verify` natijasiga qarab requestni o‘tkazadi yoki bloklaydi.
+
+---
+
+## 6) Production shartlar va xavfsizlik
+
+1) Auth-service va microservice portlari internetga ochilmasin (faqat Nginx public).
+2) `/_auth_check` `internal;` bo‘lishi shart (sizda bor).
+3) HTTPS bo‘lsa cookie `Secure` qiling.
+4) Refresh tokenlarni server-side saqlash/rotation tavsiya (Redis/DB).
+5) Microservice’lar to‘g‘ridan-to‘g‘ri internetdan chaqirilmasin; faqat Nginx orqali.
+
+---
+
+## 7) Tez test (curl)
+
+### Token yo‘q → 401
 ```bash
-curl -i http://localhost/api/orders/123 \
-  -H "Authorization: Bearer <ACCESS_TOKEN>"
+curl -i http://localhost/api/products
 ```
 
-### 10.3. `_auth_check` tashqaridan chaqirib bo‘lmaydi (kutilgan)
+### Token bilan → 200 yoki 401
+```bash
+curl -i http://localhost/api/products   -H "Authorization: Bearer <JWT_ACCESS>"
+```
+
+### `_auth_check` tashqaridan chaqirib bo‘lmaydi (kutilgan)
 ```bash
 curl -i http://localhost/_auth_check
-# natija: 404 yoki 403 (Nginx internal sababli)
 ```
 
 ---
 
-## 11) Xulosa
+## 8) Muallif
 
-Sizning Nginx konfiguratsiyangiz:
-- Markaziy auth tekshiruvni (`/_auth_check`) bitta joyga jamlaydi
-- Har protected endpointda `auth_request` orqali “gatekeeper” vazifasini bajaradi
-- Auth-service `verify` orqali identity headerlarni qaytaradi
-- Microservice’lar esa auth logikasiz, faqat `X-User-*` headerlar bilan ishlaydi
-
----
-
-**Muallif:** Abdujabborov Oybek + ChatGPT
+Abdujabborov Oybek + ChatGPT
